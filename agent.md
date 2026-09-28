@@ -7,7 +7,7 @@
 - `backend/data.db`: local runtime database, created automatically on the first request that reads or writes data.
 - `backend/tests/test_api.py`: endpoint and persistence checks.
 - `netlify/functions/api.mjs`: deployed same-origin API backed by Netlify Blobs.
-- `netlify/functions/api.test.mjs`: Netlify function route and CRUD tests.
+- `tests/api.test.mjs`: Netlify function route and CRUD tests, kept outside Netlify's deployable functions directory.
 
 ## Run and validate
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createApiHandler } from './api.mjs'
+import { createApiHandler } from '../netlify/functions/api.mjs'
 
 function setup() {
   const state = new Map()

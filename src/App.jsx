@@ -2,6 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, CheckCircle2, Circle, Folder, Plus, RefreshCw, Search, StickyNote, Trash2, X } from 'lucide-react'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
+let memoryClientId
+
+function getClientId() {
+  const key = 'daymark-client-id'
+  try {
+    let id = window.localStorage.getItem(key)
+    if (!id) {
+      id = window.crypto.randomUUID()
+      window.localStorage.setItem(key, id)
+    }
+    return id
+  } catch {
+    memoryClientId ||= window.crypto.randomUUID()
+    return memoryClientId
+  }
+}
+
 const today = () => {
   const date = new Date()
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset())
@@ -13,7 +30,7 @@ async function request(path, options = {}) {
   try {
     response = await fetch(`${API_BASE}${path}`, {
       ...options,
-      headers: { 'Content-Type': 'application/json', ...options.headers },
+      headers: { 'Content-Type': 'application/json', 'X-User-ID': getClientId(), ...options.headers },
     })
   } catch {
     throw new Error(`Can't reach ${API_BASE}. Check that FastAPI is deployed, VITE_API_BASE_URL is correct, and TODO_CORS_ORIGINS allows this site's origin.`)

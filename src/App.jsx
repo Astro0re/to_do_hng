@@ -19,12 +19,6 @@ function getClientId() {
   }
 }
 
-const today = () => {
-  const date = new Date()
-  date.setMinutes(date.getMinutes() - date.getTimezoneOffset())
-  return date.toISOString().slice(0, 10)
-}
-
 async function request(path, options = {}) {
   let response
   try {
@@ -53,7 +47,7 @@ function App() {
   const [tasks, setTasks] = useState([])
   const [folders, setFolders] = useState([])
   const [notes, setNotes] = useState([])
-  const [view, setView] = useState('today')
+  const [view, setView] = useState('all')
   const [folderId, setFolderId] = useState('')
   const [search, setSearch] = useState('')
   const [title, setTitle] = useState('')
@@ -90,8 +84,6 @@ function App() {
 
   const shownTasks = useMemo(() => tasks.filter((task) => {
     if (folderId && task.folder_id !== folderId) return false
-    if (!folderId && view === 'today' && (task.due_date !== today() || task.completed)) return false
-    if (!folderId && view === 'upcoming' && (!task.due_date || task.due_date < today() || task.completed)) return false
     if (!folderId && view === 'completed' && !task.completed) return false
     if (!folderId && view === 'all' && task.completed) return false
     return task.title.toLowerCase().includes(search.trim().toLowerCase())
@@ -196,7 +188,7 @@ function App() {
 
   const heading = folderId
     ? folders.find((folder) => folder.id === folderId)?.name || 'Folder'
-    : ({ today: 'Today', upcoming: 'Upcoming', all: 'To do', completed: 'Completed' }[view])
+    : ({ all: 'To do', completed: 'Completed' }[view])
 
   return (
     <main className="app">
@@ -210,8 +202,6 @@ function App() {
         <aside className="sidebar">
           <p className="side-label">TASKS</p>
           <nav aria-label="Task views">
-            <ViewButton active={!folderId && view === 'today'} onClick={() => { setFolderId(''); setTaskFolder(''); setView('today') }} label="Today" count={tasks.filter((task) => !task.completed && task.due_date === today()).length} />
-            <ViewButton active={!folderId && view === 'upcoming'} onClick={() => { setFolderId(''); setTaskFolder(''); setView('upcoming') }} label="Upcoming" />
             <ViewButton active={!folderId && view === 'all'} onClick={() => { setFolderId(''); setTaskFolder(''); setView('all') }} label="To do" count={tasks.filter((task) => !task.completed).length} />
             <ViewButton active={!folderId && view === 'completed'} onClick={() => { setFolderId(''); setTaskFolder(''); setView('completed') }} label="Completed" />
           </nav>

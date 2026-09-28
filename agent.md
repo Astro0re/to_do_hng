@@ -17,6 +17,8 @@
 6. Run `npm run build` to catch frontend compilation errors.
 7. Manually check the UI at desktop and mobile widths: navigation, search, filters, folder assignment, completion, due dates, priorities, note colors/reminder dates, empty states, and API error recovery.
 
+For a separately hosted frontend, set `VITE_API_BASE_URL` to the backend URL ending in `/api` and set backend `TODO_CORS_ORIGINS` to the frontend origin. For hosted persistence, set `TODO_DATA_FILE` to a writable persistent disk path.
+
 The API tests use a temporary JSON data file. They cover health, folder/task/note CRUD, task filtering and completion, payload validation, missing records, duplicate folders, folder deletion unassigning tasks, and data persistence across requests.
 
 ## Good next improvements

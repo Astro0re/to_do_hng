@@ -37,10 +37,16 @@ def read_data() -> dict:
 
 def write_data(data: dict) -> None:
     with data_lock:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        temporary_file = DATA_FILE.with_suffix(".tmp")
-        temporary_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        temporary_file.replace(DATA_FILE)
+        try:
+            DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temporary_file = DATA_FILE.with_suffix(".tmp")
+            temporary_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temporary_file.replace(DATA_FILE)
+        except OSError as error:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not save task data. Check that TODO_DATA_FILE is writable.",
+            ) from error
 
 
 class InputModel(BaseModel):

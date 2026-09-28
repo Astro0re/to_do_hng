@@ -33,7 +33,7 @@ async function request(path, options = {}) {
       headers: { 'Content-Type': 'application/json', 'X-User-ID': getClientId(), ...options.headers },
     })
   } catch {
-    throw new Error(`Can't reach ${API_BASE}. Check that FastAPI is deployed, VITE_API_BASE_URL is correct, and TODO_CORS_ORIGINS allows this site's origin.`)
+    throw new Error(`Can't reach ${API_BASE}. Check that the Netlify Function is deployed and that VITE_API_BASE_URL is unset or points to this site's API.`)
   }
 
   const body = await response.text()

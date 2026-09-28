@@ -1,14 +1,30 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createApiHandler } from './api.mjs'
+import { createApiHandler } from '../netlify/functions/api.mjs'
 
 function setup() {
-  const state = new Map()
-  const handler = createApiHandler(() => ({
-    async get(key) { return state.has(key) ? JSON.parse(state.get(key)) : null },
-    async set(key, value) { state.set(key, value) },
-  }))
+  const state = { tasks: [], folders: [], notes: [] }
+  const repository = {
+    listTasks: async (clientId, folderId) => state.tasks.filter((item) => item.clientId === clientId && (!folderId || item.folderId === folderId)),
+    listFolders: async (clientId) => state.folders.filter((item) => item.clientId === clientId),
+    listNotes: async (clientId) => state.notes.filter((item) => item.clientId === clientId),
+    findTask: async (clientId, id) => state.tasks.find((item) => item.clientId === clientId && item.id === id),
+    findFolder: async (clientId, id) => state.folders.find((item) => item.clientId === clientId && item.id === id),
+    findNote: async (clientId, id) => state.notes.find((item) => item.clientId === clientId && item.id === id),
+    createTask: async (value) => (state.tasks.push(value), value),
+    createFolder: async (value) => (state.folders.push(value), value),
+    createNote: async (value) => (state.notes.unshift(value), value),
+    updateTask: async (clientId, id, value) => Object.assign(state.tasks.find((item) => item.clientId === clientId && item.id === id), value),
+    updateNote: async (clientId, id, value) => Object.assign(state.notes.find((item) => item.clientId === clientId && item.id === id), value),
+    deleteTask: async (clientId, id) => { state.tasks = state.tasks.filter((item) => item.clientId !== clientId || item.id !== id) },
+    deleteFolder: async (clientId, id) => {
+      state.folders = state.folders.filter((item) => item.clientId !== clientId || item.id !== id)
+      state.tasks = state.tasks.map((item) => item.folderId === id ? { ...item, folderId: null } : item)
+    },
+    deleteNote: async (clientId, id) => { state.notes = state.notes.filter((item) => item.clientId !== clientId || item.id !== id) },
+  }
+  const handler = createApiHandler(() => repository)
   const headers = { 'Content-Type': 'application/json', 'X-User-ID': '6ba7b810-9dad-41d1-80b4-00c04fd430c8' }
   const request = (path, method = 'GET', body) => handler(new Request(`https://example.test/api${path}`, {
     method,
@@ -70,7 +86,7 @@ test('keeps each browser client data separate and rejects invalid input', async 
   const response = await request('/tasks', 'POST', { title: '   ' })
   assert.equal(response.status, 422)
 
-  const handler = createApiHandler(() => ({ get: async () => null, set: async () => {} }))
+  const handler = createApiHandler(() => { throw new Error('repository should not be used') })
   const otherClient = await handler(new Request('https://example.test/api/tasks'))
   assert.equal(otherClient.status, 400)
 })

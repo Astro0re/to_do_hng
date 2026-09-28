@@ -16,7 +16,7 @@ async function request(path, options = {}) {
       headers: { 'Content-Type': 'application/json', ...options.headers },
     })
   } catch {
-    throw new Error(`Can't reach the API at ${API_BASE}. Start the FastAPI server or set VITE_API_BASE_URL.`)
+    throw new Error(`Can't reach ${API_BASE}. Check that FastAPI is deployed, VITE_API_BASE_URL is correct, and TODO_CORS_ORIGINS allows this site's origin.`)
   }
 
   const body = await response.text()

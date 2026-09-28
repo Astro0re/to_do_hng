@@ -6,7 +6,8 @@ from backend import main
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "DATA_FILE", tmp_path / "data.json")
+    monkeypatch.setattr(main, "DATABASE_FILE", tmp_path / "data.db")
+    monkeypatch.setattr(main, "LEGACY_DATA_FILE", tmp_path / "legacy.json")
     with TestClient(main.app) as test_client:
         yield test_client
 
@@ -15,6 +16,18 @@ def test_health_check(client):
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_deployed_frontend_origin_is_allowed(client):
+    response = client.options(
+        "/api/tasks",
+        headers={
+            "Origin": "https://todoapphng.netlify.app",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://todoapphng.netlify.app"
 
 
 def test_folder_crud_and_duplicate_validation(client):
@@ -72,3 +85,17 @@ def test_note_and_folder_payload_validation(client):
     assert client.post("/api/notes", json={"content": "Note", "color": "purple"}).status_code == 422
     assert client.post("/api/notes", json={"content": ""}).status_code == 422
     assert client.post("/api/folders", json={"name": "Bad color", "color": "red"}).status_code == 422
+
+
+def test_migrates_existing_json_data(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "LEGACY_DATA_FILE", tmp_path / "legacy.json")
+    main.LEGACY_DATA_FILE.write_text(
+        '{"folders": [], "tasks": [{"id": "old-task", "title": "Imported task"}], "notes": []}',
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/tasks")
+
+    assert response.status_code == 200
+    assert response.json()[0]["id"] == "old-task"
+    assert response.json()[0]["title"] == "Imported task"

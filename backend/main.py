@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -12,7 +13,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 
-DATA_FILE = Path(os.getenv("TODO_DATA_FILE", Path(__file__).with_name("data.json")))
+DATABASE_FILE = Path(os.getenv("TODO_DATABASE_FILE", Path(__file__).with_name("data.db")))
+LEGACY_DATA_FILE = Path(__file__).with_name("data.json")
+database_lock = Lock()
 data_lock = Lock()
 
 
@@ -20,33 +23,136 @@ def timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def open_database() -> sqlite3.Connection:
+    with database_lock:
+        database_existed = DATABASE_FILE.exists()
+        try:
+            DATABASE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(DATABASE_FILE, timeout=30)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS folders (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    color TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    folder_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
+                    due_date TEXT,
+                    priority TEXT NOT NULL CHECK(priority IN ('low', 'medium', 'high')),
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS notes (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    color TEXT NOT NULL,
+                    reminder_date TEXT,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+            if not database_existed and LEGACY_DATA_FILE.exists():
+                migrate_legacy_data(connection)
+            connection.commit()
+            return connection
+        except (OSError, sqlite3.Error, json.JSONDecodeError) as error:
+            if "connection" in locals():
+                connection.close()
+            raise HTTPException(
+                status_code=500,
+                detail="Could not open SQLite storage. Check that TODO_DATABASE_FILE is writable.",
+            ) from error
+
+
+def migrate_legacy_data(connection: sqlite3.Connection) -> None:
+    payload = json.loads(LEGACY_DATA_FILE.read_text(encoding="utf-8"))
+    for folder in payload.get("folders", []):
+        connection.execute(
+            "INSERT OR IGNORE INTO folders (id, name, color, created_at) VALUES (?, ?, ?, ?)",
+            (folder["id"], folder["name"], folder.get("color", "#879c85"), folder.get("created_at", timestamp())),
+        )
+    for task in payload.get("tasks", []):
+        connection.execute(
+            """INSERT OR IGNORE INTO tasks
+            (id, title, folder_id, due_date, priority, completed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                task["id"], task["title"], task.get("folder_id"), task.get("due_date"),
+                task.get("priority", "medium"), int(task.get("completed", False)), task.get("created_at", timestamp()),
+            ),
+        )
+    for note in payload.get("notes", []):
+        connection.execute(
+            """INSERT OR IGNORE INTO notes
+            (id, title, content, color, reminder_date, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                note["id"], note.get("title", ""), note["content"], note.get("color", "sunflower"),
+                note.get("reminder_date"), note.get("created_at", timestamp()),
+            ),
+        )
+
+
 def read_data() -> dict:
     with data_lock:
-        if not DATA_FILE.exists():
-            return {"tasks": [], "folders": [], "notes": []}
+        connection = open_database()
         try:
-            payload = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-            return {
-                "tasks": payload.get("tasks", []),
-                "folders": payload.get("folders", []),
-                "notes": payload.get("notes", []),
+            data = {
+                table: [dict(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()]
+                for table in ("tasks", "folders", "notes")
             }
-        except (json.JSONDecodeError, OSError) as error:
-            raise HTTPException(status_code=500, detail="Stored data could not be read") from error
+            for task in data["tasks"]:
+                task["completed"] = bool(task["completed"])
+            return data
+        except sqlite3.Error as error:
+            raise HTTPException(status_code=500, detail="Could not read SQLite storage") from error
+        finally:
+            connection.close()
 
 
 def write_data(data: dict) -> None:
     with data_lock:
+        connection = open_database()
         try:
-            DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-            temporary_file = DATA_FILE.with_suffix(".tmp")
-            temporary_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            temporary_file.replace(DATA_FILE)
-        except OSError as error:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM tasks")
+            connection.execute("DELETE FROM notes")
+            connection.execute("DELETE FROM folders")
+            connection.executemany(
+                "INSERT INTO folders (id, name, color, created_at) VALUES (?, ?, ?, ?)",
+                [(item["id"], item["name"], item["color"], item["created_at"]) for item in data["folders"]],
+            )
+            connection.executemany(
+                """INSERT INTO tasks
+                (id, title, folder_id, due_date, priority, completed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (item["id"], item["title"], item["folder_id"], item["due_date"], item["priority"],
+                     int(item["completed"]), item["created_at"])
+                    for item in data["tasks"]
+                ],
+            )
+            connection.executemany(
+                """INSERT INTO notes
+                (id, title, content, color, reminder_date, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
+                [
+                    (item["id"], item["title"], item["content"], item["color"], item["reminder_date"], item["created_at"])
+                    for item in data["notes"]
+                ],
+            )
+            connection.commit()
+        except (OSError, sqlite3.Error) as error:
+            connection.rollback()
             raise HTTPException(
                 status_code=500,
-                detail="Could not save task data. Check that TODO_DATA_FILE is writable.",
+                detail="Could not save task data to SQLite. Check that TODO_DATABASE_FILE is writable.",
             ) from error
+        finally:
+            connection.close()
 
 
 class InputModel(BaseModel):
@@ -90,7 +196,14 @@ class NoteUpdate(InputModel):
 app = FastAPI(title="Daymark To-Do API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("TODO_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(","),
+    allow_origins=[
+        origin.strip().rstrip("/")
+        for origin in os.getenv(
+            "TODO_CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173,https://todoapphng.netlify.app",
+        ).split(",")
+        if origin.strip()
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],

@@ -1,89 +1,67 @@
-import { getStore } from '@netlify/blobs'
+import { and, desc, eq } from 'drizzle-orm'
+import { getDb } from '../../db/index.ts'
+import { folders, notes, tasks } from '../../db/schema.ts'
 
-const emptyState = () => ({ tasks: [], folders: [], notes: [] })
 const userIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-
-class ApiError extends Error {
-  constructor(status, message) {
-    super(message)
-    this.status = status
-  }
+class ApiError extends Error { constructor(status, message) { super(message); this.status = status } }
+function apiPayload(value) {
+  if (Array.isArray(value)) return value.map(apiPayload)
+  if (!value || typeof value !== 'object' || value instanceof Date) return value
+  const keyNames = { folderId: 'folder_id', dueDate: 'due_date', reminderDate: 'reminder_date', createdAt: 'created_at' }
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== 'clientId')
+    .map(([key, item]) => [keyNames[key] || key, apiPayload(item)]))
 }
-
-function jsonResponse(payload, status = 200) {
-  return new Response(payload === null ? null : JSON.stringify(payload), {
-    status,
-    headers: payload === null ? undefined : { 'Content-Type': 'application/json' },
-  })
-}
+const jsonResponse = (payload, status = 200) => new Response(payload === null ? null : JSON.stringify(apiPayload(payload)), { status, headers: payload === null ? undefined : { 'Content-Type': 'application/json' } })
 
 function validateDate(value) {
   if (value === null || value === undefined || value === '') return null
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new ApiError(422, 'Date must use YYYY-MM-DD format')
-  }
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new ApiError(422, 'Date must use YYYY-MM-DD format')
   const date = new Date(`${value}T00:00:00.000Z`)
-  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
-    throw new ApiError(422, 'Date is invalid')
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) throw new ApiError(422, 'Date is invalid')
+  return value
+}
+function validateColor(value, allowed) { if (!allowed.includes(value)) throw new ApiError(422, 'Color is invalid'); return value }
+
+export function createDatabaseRepository(database = getDb()) {
+  return {
+    listTasks: (clientId, folderId) => database.select().from(tasks).where(folderId ? and(eq(tasks.clientId, clientId), eq(tasks.folderId, folderId)) : eq(tasks.clientId, clientId)),
+    listFolders: (clientId) => database.select().from(folders).where(eq(folders.clientId, clientId)),
+    listNotes: (clientId) => database.select().from(notes).where(eq(notes.clientId, clientId)).orderBy(desc(notes.createdAt)),
+    createTask: async (value) => (await database.insert(tasks).values(value).returning())[0],
+    createFolder: async (value) => (await database.insert(folders).values(value).returning())[0],
+    createNote: async (value) => (await database.insert(notes).values(value).returning())[0],
+    findTask: async (clientId, id) => (await database.select().from(tasks).where(and(eq(tasks.clientId, clientId), eq(tasks.id, id))).limit(1))[0],
+    findFolder: async (clientId, id) => (await database.select().from(folders).where(and(eq(folders.clientId, clientId), eq(folders.id, id))).limit(1))[0],
+    findNote: async (clientId, id) => (await database.select().from(notes).where(and(eq(notes.clientId, clientId), eq(notes.id, id))).limit(1))[0],
+    updateTask: async (clientId, id, value) => (await database.update(tasks).set(value).where(and(eq(tasks.clientId, clientId), eq(tasks.id, id))).returning())[0],
+    updateNote: async (clientId, id, value) => (await database.update(notes).set(value).where(and(eq(notes.clientId, clientId), eq(notes.id, id))).returning())[0],
+    deleteTask: (clientId, id) => database.delete(tasks).where(and(eq(tasks.clientId, clientId), eq(tasks.id, id))),
+    deleteFolder: (clientId, id) => database.delete(folders).where(and(eq(folders.clientId, clientId), eq(folders.id, id))),
+    deleteNote: (clientId, id) => database.delete(notes).where(and(eq(notes.clientId, clientId), eq(notes.id, id))),
   }
-  return value
 }
 
-function validateColor(value, allowed) {
-  if (!allowed.includes(value)) throw new ApiError(422, 'Color is invalid')
-  return value
-}
-
-export function createApiHandler(getStorage = getStore) {
+export function createApiHandler(createRepository = () => createDatabaseRepository()) {
   return async function handleApiRequest(request) {
     const url = new URL(request.url)
     const route = url.pathname.replace(/^\/api(?=\/|$)/, '') || '/'
     const method = request.method.toUpperCase()
-
     if (route === '/health' && method === 'GET') return jsonResponse({ status: 'ok' })
-    if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) {
-      return jsonResponse({ detail: 'Method not allowed' }, 405)
-    }
-
-    const userId = request.headers.get('x-user-id') || ''
-    if (!userIdPattern.test(userId)) return jsonResponse({ detail: 'A valid client ID is required' }, 400)
-
-    const store = getStorage({ name: 'daymark-todo', consistency: 'strong' })
-    const storageKey = `client:${userId}`
-    let data
-    try {
-      data = await store.get(storageKey, { type: 'json' }) || emptyState()
-    } catch {
-      return jsonResponse({ detail: 'Could not read deployed task storage' }, 500)
-    }
-
-    async function save() {
-      try {
-        await store.set(storageKey, JSON.stringify(data))
-      } catch {
-        throw new ApiError(500, 'Could not save task data to deployed storage')
-      }
-    }
+    if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return jsonResponse({ detail: 'Method not allowed' }, 405)
+    const clientId = request.headers.get('x-user-id') || ''
+    if (!userIdPattern.test(clientId)) return jsonResponse({ detail: 'A valid client ID is required' }, 400)
 
     try {
-      if (route === '/tasks' && method === 'GET') {
-        const folderId = url.searchParams.get('folder_id')
-        return jsonResponse(folderId ? data.tasks.filter((task) => task.folder_id === folderId) : data.tasks)
-      }
-
-      if (route === '/folders' && method === 'GET') return jsonResponse(data.folders)
-      if (route === '/notes' && method === 'GET') return jsonResponse(data.notes)
+      const repository = createRepository()
+      if (route === '/tasks' && method === 'GET') return jsonResponse(await repository.listTasks(clientId, url.searchParams.get('folder_id')))
+      if (route === '/folders' && method === 'GET') return jsonResponse(await repository.listFolders(clientId))
+      if (route === '/notes' && method === 'GET') return jsonResponse(await repository.listNotes(clientId))
 
       let payload = null
       if (method === 'POST' || method === 'PATCH') {
-        try {
-          payload = await request.json()
-        } catch {
-          throw new ApiError(400, 'Request body must be valid JSON')
-        }
-        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-          throw new ApiError(422, 'Request body must be an object')
-        }
+        try { payload = await request.json() } catch { throw new ApiError(400, 'Request body must be valid JSON') }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new ApiError(422, 'Request body must be an object')
       }
 
       if (route === '/tasks' && method === 'POST') {
@@ -92,77 +70,36 @@ export function createApiHandler(getStorage = getStore) {
         const priority = payload.priority ?? 'medium'
         if (!['low', 'medium', 'high'].includes(priority)) throw new ApiError(422, 'Priority is invalid')
         const folderId = payload.folder_id || null
-        if (folderId && !data.folders.some((folder) => folder.id === folderId)) throw new ApiError(404, 'Folder not found')
-        const task = {
-          id: crypto.randomUUID(), title, folder_id: folderId,
-          due_date: validateDate(payload.due_date), priority, completed: false,
-          created_at: new Date().toISOString(),
-        }
-        data.tasks.push(task)
-        await save()
-        return jsonResponse(task, 201)
+        if (folderId && !await repository.findFolder(clientId, folderId)) throw new ApiError(404, 'Folder not found')
+        return jsonResponse(await repository.createTask({ id: crypto.randomUUID(), clientId, title, folderId, dueDate: validateDate(payload.due_date), priority, completed: false }), 201)
       }
 
       const taskMatch = route.match(/^\/tasks\/([^/]+)$/)
       if (taskMatch) {
-        const taskIndex = data.tasks.findIndex((task) => task.id === decodeURIComponent(taskMatch[1]))
-        if (taskIndex < 0) throw new ApiError(404, 'Task not found')
-        if (method === 'DELETE') {
-          data.tasks.splice(taskIndex, 1)
-          await save()
-          return jsonResponse(null, 204)
-        }
+        const id = decodeURIComponent(taskMatch[1]); const task = await repository.findTask(clientId, id)
+        if (!task) throw new ApiError(404, 'Task not found')
+        if (method === 'DELETE') { await repository.deleteTask(clientId, id); return jsonResponse(null, 204) }
         if (method === 'PATCH') {
-          const task = data.tasks[taskIndex]
-          if ('title' in payload) {
-            const title = typeof payload.title === 'string' ? payload.title.trim() : ''
-            if (!title || title.length > 160) throw new ApiError(422, 'Title must be between 1 and 160 characters')
-            task.title = title
-          }
-          if ('folder_id' in payload) {
-            if (payload.folder_id && !data.folders.some((folder) => folder.id === payload.folder_id)) {
-              throw new ApiError(404, 'Folder not found')
-            }
-            task.folder_id = payload.folder_id || null
-          }
-          if ('due_date' in payload) task.due_date = validateDate(payload.due_date)
-          if ('priority' in payload) {
-            if (!['low', 'medium', 'high'].includes(payload.priority)) throw new ApiError(422, 'Priority is invalid')
-            task.priority = payload.priority
-          }
-          if ('completed' in payload) {
-            if (typeof payload.completed !== 'boolean') throw new ApiError(422, 'Completed must be true or false')
-            task.completed = payload.completed
-          }
-          await save()
-          return jsonResponse(task)
+          const changes = {}
+          if ('title' in payload) { const title = typeof payload.title === 'string' ? payload.title.trim() : ''; if (!title || title.length > 160) throw new ApiError(422, 'Title must be between 1 and 160 characters'); changes.title = title }
+          if ('folder_id' in payload) { if (payload.folder_id && !await repository.findFolder(clientId, payload.folder_id)) throw new ApiError(404, 'Folder not found'); changes.folderId = payload.folder_id || null }
+          if ('due_date' in payload) changes.dueDate = validateDate(payload.due_date)
+          if ('priority' in payload) { if (!['low', 'medium', 'high'].includes(payload.priority)) throw new ApiError(422, 'Priority is invalid'); changes.priority = payload.priority }
+          if ('completed' in payload) { if (typeof payload.completed !== 'boolean') throw new ApiError(422, 'Completed must be true or false'); changes.completed = payload.completed }
+          return jsonResponse(Object.keys(changes).length ? await repository.updateTask(clientId, id, changes) : task)
         }
       }
 
       if (route === '/folders' && method === 'POST') {
         const name = typeof payload.name === 'string' ? payload.name.trim() : ''
         if (!name || name.length > 40) throw new ApiError(422, 'Folder name must be between 1 and 40 characters')
-        if (data.folders.some((folder) => folder.name.toLowerCase() === name.toLowerCase())) {
-          throw new ApiError(409, 'A folder with this name already exists')
-        }
+        if ((await repository.listFolders(clientId)).some((folder) => folder.name.toLowerCase() === name.toLowerCase())) throw new ApiError(409, 'A folder with this name already exists')
         const color = payload.color ?? '#879c85'
         if (typeof color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(color)) throw new ApiError(422, 'Folder color is invalid')
-        const folder = { id: crypto.randomUUID(), name, color, created_at: new Date().toISOString() }
-        data.folders.push(folder)
-        await save()
-        return jsonResponse(folder, 201)
+        return jsonResponse(await repository.createFolder({ id: crypto.randomUUID(), clientId, name, color }), 201)
       }
-
       const folderMatch = route.match(/^\/folders\/([^/]+)$/)
-      if (folderMatch && method === 'DELETE') {
-        const folderId = decodeURIComponent(folderMatch[1])
-        const index = data.folders.findIndex((folder) => folder.id === folderId)
-        if (index < 0) throw new ApiError(404, 'Folder not found')
-        data.folders.splice(index, 1)
-        data.tasks = data.tasks.map((task) => task.folder_id === folderId ? { ...task, folder_id: null } : task)
-        await save()
-        return jsonResponse(null, 204)
-      }
+      if (folderMatch && method === 'DELETE') { const id = decodeURIComponent(folderMatch[1]); if (!await repository.findFolder(clientId, id)) throw new ApiError(404, 'Folder not found'); await repository.deleteFolder(clientId, id); return jsonResponse(null, 204) }
 
       if (route === '/notes' && method === 'POST') {
         const content = typeof payload.content === 'string' ? payload.content.trim() : ''
@@ -170,53 +107,30 @@ export function createApiHandler(getStorage = getStore) {
         const title = typeof payload.title === 'string' ? payload.title.trim() : ''
         if (title.length > 80) throw new ApiError(422, 'Reminder title must be 80 characters or fewer')
         const color = validateColor(payload.color ?? 'sunflower', ['sunflower', 'sky', 'rose', 'sage'])
-        const note = {
-          id: crypto.randomUUID(), title, content, color,
-          reminder_date: validateDate(payload.reminder_date), created_at: new Date().toISOString(),
-        }
-        data.notes.unshift(note)
-        await save()
-        return jsonResponse(note, 201)
+        return jsonResponse(await repository.createNote({ id: crypto.randomUUID(), clientId, title, content, color, reminderDate: validateDate(payload.reminder_date) }), 201)
       }
-
       const noteMatch = route.match(/^\/notes\/([^/]+)$/)
       if (noteMatch) {
-        const index = data.notes.findIndex((note) => note.id === decodeURIComponent(noteMatch[1]))
-        if (index < 0) throw new ApiError(404, 'Note not found')
-        if (method === 'DELETE') {
-          data.notes.splice(index, 1)
-          await save()
-          return jsonResponse(null, 204)
-        }
+        const id = decodeURIComponent(noteMatch[1]); const note = await repository.findNote(clientId, id)
+        if (!note) throw new ApiError(404, 'Note not found')
+        if (method === 'DELETE') { await repository.deleteNote(clientId, id); return jsonResponse(null, 204) }
         if (method === 'PATCH') {
-          const note = data.notes[index]
-          if ('title' in payload) {
-            if (typeof payload.title !== 'string' || payload.title.length > 80) throw new ApiError(422, 'Reminder title is invalid')
-            note.title = payload.title.trim()
-          }
-          if ('content' in payload) {
-            if (typeof payload.content !== 'string' || !payload.content.trim() || payload.content.length > 1000) {
-              throw new ApiError(422, 'Reminder content is invalid')
-            }
-            note.content = payload.content.trim()
-          }
-          if ('color' in payload) note.color = validateColor(payload.color, ['sunflower', 'sky', 'rose', 'sage'])
-          if ('reminder_date' in payload) note.reminder_date = validateDate(payload.reminder_date)
-          await save()
-          return jsonResponse(note)
+          const changes = {}
+          if ('title' in payload) { if (typeof payload.title !== 'string' || payload.title.length > 80) throw new ApiError(422, 'Reminder title is invalid'); changes.title = payload.title.trim() }
+          if ('content' in payload) { if (typeof payload.content !== 'string' || !payload.content.trim() || payload.content.length > 1000) throw new ApiError(422, 'Reminder content is invalid'); changes.content = payload.content.trim() }
+          if ('color' in payload) changes.color = validateColor(payload.color, ['sunflower', 'sky', 'rose', 'sage'])
+          if ('reminder_date' in payload) changes.reminderDate = validateDate(payload.reminder_date)
+          return jsonResponse(Object.keys(changes).length ? await repository.updateNote(clientId, id, changes) : note)
         }
       }
-
       return jsonResponse({ detail: 'Endpoint not found' }, 404)
     } catch (error) {
       if (error instanceof ApiError) return jsonResponse({ detail: error.message }, error.status)
-      return jsonResponse({ detail: 'Unexpected API error' }, 500)
+      console.error('API request failed', error instanceof Error ? error.message : 'Unknown error')
+      return jsonResponse({ detail: 'The API could not access task storage' }, 500)
     }
   }
 }
 
 export default createApiHandler()
-
-export const config = {
-  path: ['/api', '/api/*'],
-}
+export const config = { path: ['/api', '/api/*'] }

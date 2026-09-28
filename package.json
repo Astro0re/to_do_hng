@@ -7,16 +7,19 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:functions": "node --test netlify/functions/api.test.mjs"
+    "test:functions": "node --test tests/api.test.mjs"
   },
   "dependencies": {
+    "@netlify/database": "^2.0.1",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "drizzle-orm": "^1.0.0-beta.22",
+    "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest",
-    "@netlify/blobs": "latest"
+    "typescript": "latest",
+    "vite": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "drizzle-kit": "^1.0.0-beta.22"
+  }
 }
